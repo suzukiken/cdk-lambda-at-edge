@@ -4,6 +4,9 @@ import * as iam from "@aws-cdk/aws-iam";
 import * as lambda from "@aws-cdk/aws-lambda";
 import * as cloudfront from "@aws-cdk/aws-cloudfront";
 import * as ssm from "@aws-cdk/aws-ssm";
+import * as route53 from "@aws-cdk/aws-route53";
+import * as targets from "@aws-cdk/aws-route53-targets/lib";
+import * as acm from "@aws-cdk/aws-certificatemanager";
 
 const sha256File = require("sha256-file"); // npm install sha256-file
 
@@ -18,7 +21,7 @@ export class CdklambdaatedgeStack extends cdk.Stack {
     const role_arn = ssm.StringParameter.fromStringParameterName(
       this,
       "ssm_stringvalue_role_arn",
-      "cdkadmincognito-iam-authenticated-role"
+      "cdkadmincognito-iam-authenticated-role-arn"
     ).stringValue;
 
     const auth_role = iam.Role.fromRoleArn(
@@ -35,6 +38,29 @@ export class CdklambdaatedgeStack extends cdk.Stack {
 
     const bucket = new s3.Bucket(this, "derivery-figment-research", {
       bucketName: bucket_name,
+      websiteIndexDocument: "index.html",
+      websiteErrorDocument: "error.html",
+      publicReadAccess: true, // this line activates static website hosting
+      cors: [
+        {
+          allowedMethods: [
+            s3.HttpMethods.HEAD,
+            s3.HttpMethods.GET,
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.POST,
+            s3.HttpMethods.DELETE,
+          ],
+          allowedOrigins: ["*"],
+          allowedHeaders: ["*"],
+          exposedHeaders: [
+            "x-amz-server-side-encryption",
+            "x-amz-request-id",
+            "x-amz-id-2",
+            "ETag",
+          ],
+          maxAge: 3000,
+        },
+      ],
     });
 
     //-------------------------- lambda
@@ -66,8 +92,13 @@ export class CdklambdaatedgeStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
     });
 
-    iam_s3_policy_statement.addActions("s3:GetObject", "s3:PutObject");
+    iam_s3_policy_statement.addActions("s3:PutObject");
+    iam_s3_policy_statement.addActions("s3:GetObject");
+    iam_s3_policy_statement.addActions("s3:ListBucket");
+    iam_s3_policy_statement.addActions("s3:DeleteObject");
+    iam_s3_policy_statement.addActions("s3:PutObjectAcl");
     iam_s3_policy_statement.addResources(bucket.bucketArn);
+    iam_s3_policy_statement.addResources(bucket.arnForObjects("*"));
 
     const iam_s3_policy = new iam.Policy(this, "iam_s3_policy", {
       policyName: "cdklambdaatedge-s3-policy",
@@ -90,28 +121,56 @@ export class CdklambdaatedgeStack extends cdk.Stack {
     );
     bucket.addToResourcePolicy(policyStatement);
 
-    new cloudfront.CloudFrontWebDistribution(this, "cf_distribution", {
-      originConfigs: [
-        {
-          s3OriginSource: {
-            s3BucketSource: bucket,
-            originAccessIdentity: oai,
-          },
-          behaviors: [
-            {
-              isDefaultBehavior: true,
-              defaultTtl: cdk.Duration.seconds(3),
-              lambdaFunctionAssociations: [
-                {
-                  eventType: cloudfront.LambdaEdgeEventType.ORIGIN_REQUEST,
-                  lambdaFunction: version,
-                },
-              ],
-            },
-          ],
+    const certificate = acm.Certificate.fromCertificateArn(
+      this,
+      "certificate",
+      "arn:aws:acm:us-east-1:656169322665:certificate/1e64805a-e07e-4b0c-b485-7889811bbf15"
+    );
+
+    const distribution = new cloudfront.CloudFrontWebDistribution(
+      this,
+      "distribution",
+      {
+        aliasConfiguration: {
+          acmCertRef: certificate.certificateArn,
+          names: ["delivery.figment-research.com"],
+          sslMethod: cloudfront.SSLMethod.SNI,
+          securityPolicy: cloudfront.SecurityPolicyProtocol.TLS_V1_1_2016,
         },
-      ],
-      priceClass: cloudfront.PriceClass.PRICE_CLASS_ALL,
+        originConfigs: [
+          {
+            s3OriginSource: {
+              s3BucketSource: bucket,
+              originAccessIdentity: oai,
+            },
+            behaviors: [
+              {
+                isDefaultBehavior: true,
+                defaultTtl: cdk.Duration.seconds(3),
+                lambdaFunctionAssociations: [
+                  {
+                    eventType: cloudfront.LambdaEdgeEventType.ORIGIN_REQUEST,
+                    lambdaFunction: version,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        priceClass: cloudfront.PriceClass.PRICE_CLASS_ALL,
+      }
+    );
+
+    const zone = route53.HostedZone.fromLookup(this, "zone", {
+      domainName: "figment-research.com",
+    });
+
+    const record = new route53.ARecord(this, "record", {
+      recordName: "delivery",
+      target: route53.RecordTarget.fromAlias(
+        new targets.CloudFrontTarget(distribution)
+      ),
+      zone: zone,
     });
   }
 }
