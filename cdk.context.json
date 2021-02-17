@@ -2,5 +2,6 @@
   "hosted-zone:account=656169322665:domainName=figment-research.com:region=us-east-1": {
     "Id": "/hostedzone/Z2JFRCXUA639Z3",
     "Name": "figment-research.com."
-  }
+  },
+  "ssm:account=656169322665:parameterName=lambdaatedge-domain-name:region=us-east-1": "figment-research.com"
 }

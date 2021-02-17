@@ -16,7 +16,8 @@ export class CdklambdaatedgeStack extends cdk.Stack {
 
     //-------------------------- import
 
-    // ssmパラメーターストアはCDKとリージョンが同じでないとアクセスできないので同じリージョンに置く
+    // ssmパラメーターストアはCDKとリージョンが同じでないとアクセスできないので同じリージョンにあらかじめ置いておく
+    // そのためにはリージョン間をまたがってパラメーターをコピーしてくるEventBrigeとLambda関数を別のCDKプロジェクトで用意している。
 
     const role_arn = ssm.StringParameter.fromStringParameterName(
       this,
@@ -33,7 +34,28 @@ export class CdklambdaatedgeStack extends cdk.Stack {
     const bucket_name = ssm.StringParameter.fromStringParameterName(
       this,
       "ssm_stringvalue_bucket_name",
-      "lambdaatedge-derivery-bucket-name"
+      "lambdaatedge-bucket-name"
+    ).stringValue;
+
+    /*
+    const domain_name = ssm.StringParameter.fromStringParameterName(
+      this,
+      "ssm_stringvalue_domain_name",
+      "lambdaatedge-domain-name"
+    ).stringValue;
+    */
+
+    // https://docs.aws.amazon.com/cdk/latest/guide/get_ssm_value.html
+    // Reading Systems Manager values at synthesis time
+    const domain_name = ssm.StringParameter.valueFromLookup(
+      this,
+      "lambdaatedge-domain-name"
+    );
+
+    const subdomain_name = ssm.StringParameter.fromStringParameterName(
+      this,
+      "ssm_stringvalue_subdomain_name",
+      "lambdaatedge-subdomain-name"
     ).stringValue;
 
     const bucket = new s3.Bucket(this, "derivery-figment-research", {
@@ -88,21 +110,35 @@ export class CdklambdaatedgeStack extends cdk.Stack {
 
     //-------------------------- permission
 
-    const iam_s3_policy_statement = new iam.PolicyStatement({
+    const iam_s3_obj_policy_statement = new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
     });
 
-    iam_s3_policy_statement.addActions("s3:PutObject");
-    iam_s3_policy_statement.addActions("s3:GetObject");
-    iam_s3_policy_statement.addActions("s3:ListBucket");
-    iam_s3_policy_statement.addActions("s3:DeleteObject");
-    iam_s3_policy_statement.addActions("s3:PutObjectAcl");
-    iam_s3_policy_statement.addResources(bucket.bucketArn);
-    iam_s3_policy_statement.addResources(bucket.arnForObjects("*"));
+    iam_s3_obj_policy_statement.addActions("s3:PutObject");
+    iam_s3_obj_policy_statement.addActions("s3:GetObject");
+    iam_s3_obj_policy_statement.addActions("s3:DeleteObject");
+    iam_s3_obj_policy_statement.addResources(bucket.arnForObjects("*"));
+    /*
+    iam_s3_obj_public_policy_statement.addResources(
+      bucket.arnForObjects("public/*")
+    );
+    iam_s3_obj_public_policy_statement.addResources(
+      bucket.arnForObjects("private/${cognito-identity.amazonaws.com:sub}/*")
+    );
+    iam_s3_obj_public_policy_statement.addResources(
+      bucket.arnForObjects("protected/${cognito-identity.amazonaws.com:sub}/*")
+    );
+    */
+    const iam_s3_buc_policy_statement = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+    });
+
+    iam_s3_buc_policy_statement.addActions("s3:ListBucket");
+    iam_s3_buc_policy_statement.addResources(bucket.bucketArn);
 
     const iam_s3_policy = new iam.Policy(this, "iam_s3_policy", {
       policyName: "cdklambdaatedge-s3-policy",
-      statements: [iam_s3_policy_statement],
+      statements: [iam_s3_obj_policy_statement, iam_s3_buc_policy_statement],
     });
 
     auth_role.attachInlinePolicy(iam_s3_policy);
@@ -133,7 +169,7 @@ export class CdklambdaatedgeStack extends cdk.Stack {
       {
         aliasConfiguration: {
           acmCertRef: certificate.certificateArn,
-          names: ["delivery.figment-research.com"],
+          names: [cdk.Fn.join(".", [subdomain_name, domain_name])], // subdomain_name + "." + domain_name,
           sslMethod: cloudfront.SSLMethod.SNI,
           securityPolicy: cloudfront.SecurityPolicyProtocol.TLS_V1_1_2016,
         },
@@ -161,12 +197,14 @@ export class CdklambdaatedgeStack extends cdk.Stack {
       }
     );
 
+    // Cannot determine scope for context provider hosted-zone.
+    // This usually happens when one or more of the provider props have unresolved tokens
     const zone = route53.HostedZone.fromLookup(this, "zone", {
-      domainName: "figment-research.com",
+      domainName: domain_name,
     });
 
     const record = new route53.ARecord(this, "record", {
-      recordName: "delivery",
+      recordName: subdomain_name,
       target: route53.RecordTarget.fromAlias(
         new targets.CloudFrontTarget(distribution)
       ),
